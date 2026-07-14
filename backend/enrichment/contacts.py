@@ -14,6 +14,19 @@ from backend.domain.signal import Signal
 TWITTER_RE = re.compile(r"(?:twitter\.com/|x\.com/|@)([A-Za-z0-9_]{2,15})")
 URL_RE = re.compile(r"https?://[^\s)\"']+")
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+\.[\w.]+")
+# A LinkedIn profile the person published themselves (in a bio, blog, or social link).
+LINKEDIN_RE = re.compile(
+    r"(?:https?://)?(?:[\w-]+\.)?linkedin\.com/(?:in|pub)/[A-Za-z0-9\-_%]+/?",
+    re.IGNORECASE,
+)
+
+
+def normalize_linkedin(url: str) -> str:
+    """Canonicalize a captured LinkedIn URL to https://www.linkedin.com/in/<slug>."""
+    url = url.strip().rstrip("/")
+    if not url.startswith("http"):
+        url = "https://" + url
+    return url
 
 
 class ContactEnricher:
@@ -31,12 +44,17 @@ class ContactEnricher:
                 person.contact_info.setdefault("email_source", signal.source)
 
         if not person.linkedin_url:
-            query = f'site:linkedin.com/in "{person.name}"'
+            query_bits = [f'site:linkedin.com/in "{person.name}"']
             if person.school:
-                query += f' {person.school.split("(")[0].strip()}'
+                query_bits.append(person.school.split("(")[0].strip())
+            if person.area:
+                query_bits.append(person.area)
             person.contact_info.setdefault(
-                "linkedin_search_url", f"https://www.google.com/search?q={quote_plus(query)}"
+                "linkedin_search_url",
+                f"https://www.google.com/search?q={quote_plus(' '.join(query_bits))}",
             )
+        else:
+            person.contact_info.setdefault("linkedin_source", person.contact_info.get("linkedin_source", "github"))
         return person
 
     def _apply_github_profile(self, person: Person, profile: dict) -> None:
@@ -50,9 +68,20 @@ class ContactEnricher:
             match = TWITTER_RE.search(bio)
             if match:
                 person.twitter_handle = match.group(1)
+        # LinkedIn the person published in their own bio text.
+        if not person.linkedin_url:
+            match = LINKEDIN_RE.search(bio)
+            if match:
+                person.linkedin_url = normalize_linkedin(match.group(0))
+                person.contact_info["linkedin_source"] = "github_bio"
         blog = (profile.get("blog") or "").strip()
-        if not person.personal_site and blog:
-            person.personal_site = blog if blog.startswith("http") else f"https://{blog}"
+        if blog:
+            # A blog field that is itself a LinkedIn URL is a real profile, not a site.
+            if "linkedin.com" in blog.lower() and not person.linkedin_url:
+                person.linkedin_url = normalize_linkedin(blog)
+                person.contact_info["linkedin_source"] = "github_blog"
+            elif not person.personal_site and "linkedin.com" not in blog.lower():
+                person.personal_site = blog if blog.startswith("http") else f"https://{blog}"
         if not person.email:
             match = EMAIL_RE.search(bio)
             if match:
@@ -61,7 +90,8 @@ class ContactEnricher:
         for account in profile.get("social_accounts", []):
             url = account.get("url", "")
             if "linkedin.com" in url and not person.linkedin_url:
-                person.linkedin_url = url
+                person.linkedin_url = normalize_linkedin(url)
+                person.contact_info["linkedin_source"] = "github_social"
             if ("twitter.com" in url or "x.com" in url) and not person.twitter_handle:
                 match = TWITTER_RE.search(url)
                 if match:

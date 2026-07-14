@@ -45,6 +45,10 @@ def main() -> None:
         links = c.get("contact_links") or {}
         email = links.get("email", "").replace("mailto:", "") or "—"
         signal_bits = "; ".join(s.get("summary") or s["type"] for s in c.get("top_signals", [])) or "—"
+        if links.get("linkedin"):
+            linkedin_line = f"**LinkedIn (resolved):** {links['linkedin']}"
+        else:
+            linkedin_line = f"**LinkedIn search:** {linkedin_search_url(c['name'], c.get('school'))}"
 
         lines += [
             f"## {i}. {c['name']}  ·  score {round(c['score'])}",
@@ -56,7 +60,7 @@ def main() -> None:
             f"- **Top signals:** {signal_bits}",
             f"- **Orbit:** {c.get('connection_context') or '—'}",
             f"- **Email:** {email}",
-            f"- **LinkedIn search:** {linkedin_search_url(c['name'], c.get('school'))}",
+            f"- {linkedin_line}",
             "",
         ]
 
