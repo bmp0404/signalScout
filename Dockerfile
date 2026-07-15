@@ -18,5 +18,6 @@ COPY --from=frontend /build/dist frontend/dist/
 
 ENV PORT=8000
 EXPOSE 8000
-# Expand Railway's injected port while preserving uvicorn as PID 1 for clean shutdown.
-CMD ["sh", "-c", "exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]
+# Seed only a truly empty database, then preserve uvicorn as PID 1. A later
+# SQLite migration replaces this starter set with all real discoveries.
+CMD ["sh", "-c", "python scripts/build_db.py --if-empty && exec uvicorn backend.main:app --host 0.0.0.0 --port ${PORT:-8000}"]

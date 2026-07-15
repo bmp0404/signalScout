@@ -29,6 +29,11 @@ export const api = {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(payload),
   }),
+  pageView: (payload) => request('/api/analytics/page-view', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  }),
   runDiscovery: () => request('/api/discovery/run', { method: 'POST' }),
   discoveryStatus: () => request('/api/discovery/status'),
 };

@@ -7,6 +7,7 @@ from backend.db.repositories.concentrations import ConcentrationRepository
 from backend.db.repositories.digests import DigestRepository
 from backend.db.repositories.enrichment import EnrichmentCacheRepository, EnrichmentUsageRepository
 from backend.db.repositories.graph_edges import GraphEdgeRepository
+from backend.db.repositories.page_views import PageViewRepository
 from backend.db.repositories.persons import PersonRepository
 from backend.db.repositories.signals import SignalRepository
 from backend.db.repositories.subscriptions import (
@@ -38,6 +39,7 @@ class Container:
         self.edges = GraphEdgeRepository(self.db)
         self.concentrations = ConcentrationRepository(self.db)
         self.digests = DigestRepository(self.db)
+        self.page_views = PageViewRepository(self.db)
         self.subscribers = SubscriberRepository(self.db)
         self.digest_sends = DigestSendRepository(self.db)
         self.feedback = FeedbackRepository(self.db)

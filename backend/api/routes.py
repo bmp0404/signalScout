@@ -22,6 +22,11 @@ class SubscriberSignup(BaseModel):
     seed_accounts: str = Field(default="", max_length=4000)
 
 
+class PageViewEvent(BaseModel):
+    path: str = Field(min_length=1, max_length=200)
+    referrer: str | None = Field(default=None, max_length=500)
+
+
 def build_router(container: Container) -> APIRouter:
     router = APIRouter(prefix="/api")
 
@@ -57,6 +62,15 @@ def build_router(container: Container) -> APIRouter:
             "message": f"You're signed up for the {subscriber.frequency} Signal Scout digest.",
         }
 
+    @router.post("/analytics/page-view", status_code=202)
+    def record_page_view(payload: PageViewEvent):
+        path = payload.path.strip()
+        if not path.startswith("/") or "://" in path:
+            raise HTTPException(status_code=422, detail="Page path must be relative to this site.")
+        referrer = payload.referrer.strip() if payload.referrer else None
+        container.page_views.record(path, referrer or None)
+        return {"accepted": True}
+
     @router.get("/overview")
     def overview():
         backtest = container.backtest.run()
@@ -83,7 +97,7 @@ def build_router(container: Container) -> APIRouter:
     def candidate(person_id: str):
         profile = container.candidate_service.profile(person_id)
         if not profile:
-            raise HTTPException(status_code=404, detail="person not found")
+            raise HTTPException(status_code=404, detail="That candidate is no longer available.")
         return profile
 
     @router.get("/backtest")

@@ -133,3 +133,14 @@ CREATE TABLE IF NOT EXISTS feedback_votes (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (subscriber_id, person_id)
 );
+
+-- Privacy-minimal product analytics. Deliberately excludes IP addresses,
+-- user agents, cookies, and persistent visitor identifiers.
+CREATE TABLE IF NOT EXISTS page_views (
+    id TEXT PRIMARY KEY,
+    path TEXT NOT NULL,
+    viewed_at TEXT NOT NULL,
+    referrer TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_page_views_viewed_at ON page_views(viewed_at);
