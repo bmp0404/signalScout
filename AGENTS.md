@@ -25,3 +25,15 @@
 - Backend runs via `uvicorn backend.main:app --port 8000`; frontend dev server runs on port 5173.
 - `plan.md` is a reference spec — do not edit it when implementing its to-dos.
 - Digest signup supports an authenticated immediate test send through Resend, limited to one successful test digest per subscriber every 24 hours.
+
+## Documentation Maintenance
+
+- Every module has a companion doc at `docs/modules/<module>.md` listing each file in it and a one-sentence blurb per function/class — enough for another LLM to orient without reading the source. Index at `docs/modules/README.md`.
+- Whenever code is added, changed, or removed (new file, new function, new feature, deleted function, renamed module), update the matching `docs/modules/*.md` in the same change. Stale docs count as a bug, not a follow-up.
+
+## Code Style & Modularity Conventions
+
+- One file, one purpose. Group related files into a directory (a module = a directory), not flat dumps of unrelated files.
+- Prefer a class over a bag of free functions, even when the logic has no inherent state — it keeps dependency injection, mocking, and testing consistent across the codebase (see `backend/container.py` for the wiring pattern).
+- Keep layers separate: domain dataclasses → repositories → scrapers/enrichment/scoring/discovery → services → API routes. Don't reach across layers except through the documented interface of the layer below.
+- Favor explicit constructor-injected dependencies over module-level globals or singletons.
