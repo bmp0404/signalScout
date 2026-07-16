@@ -1,0 +1,110 @@
+# Enrichment
+
+This module enriches discovered people with location, contact (email/LinkedIn/X), and identity data via pluggable licensed providers (PDL or Coresignal), orchestrated through an ordered provider chain with 30-day caching and per-provider, per-lane spend budgets. It never scrapes LinkedIn directly — all professional/profile data comes from licensed provider APIs, and any LinkedIn URL surfaced from GitHub bios is treated as self-published, not scraped.
+
+## backend/enrichment/__init__.py
+Empty file; marks `backend/enrichment` as a Python package with no exported symbols.
+
+## backend/enrichment/budgets.py
+Defines `ProviderBudget`, a provider-scoped spend ledger shared by the enrichment chain and provider search, splitting each provider's cap between a `search` lane (lead discovery) and an `enrich` lane (cross-corroboration), with a global per-run cap and soft (never-raising) exhaustion.
+
+- `ProviderBudget` — tracks and enforces per-provider, per-lane lookup budgets (PDL monthly cap split by `pdl_search_split`; Coresignal one shared daily cap across lanes) plus a global in-process per-run cap.
+  - `ProviderBudget.__init__(usage, settings)` — stores the usage repository and settings and initializes the in-process spent counter to 0.
+  - `ProviderBudget._now()` — static helper returning the current UTC datetime.
+  - `ProviderBudget._lane_caps(provider)` — computes the monthly (PDL, split by `pdl_search_split`) or daily (Coresignal, shared) cap for each lane of a given provider.
+  - `ProviderBudget._used(provider, lane)` — looks up how much of the current period's cap has already been consumed, querying monthly usage for PDL and whole-day usage for Coresignal.
+  - `ProviderBudget.remaining(provider, lane)` — returns how many fresh lookups are still allowed right now, taking the minimum of the per-run cap remainder and the lane's remaining cap (never negative).
+  - `ProviderBudget.can_spend(provider, lane)` — returns whether `remaining()` is greater than zero.
+  - `ProviderBudget.spend(provider, lane, by=1)` — records a spend of `by` units for today against the provider/lane in the usage repository and increments the in-process run counter.
+
+## backend/enrichment/contacts.py
+Defines `ContactEnricher`, which fills in a person's email, X/Twitter handle, personal site, and LinkedIn URL/search link from GitHub profile data and signal metadata, never overwriting values already set.
+
+- `normalize_linkedin(url) -> str` — canonicalizes a captured LinkedIn URL by stripping whitespace/trailing slash and prefixing `https://` if missing.
+- `ContactEnricher` — merges contact fields onto a `Person` from GitHub profile signals and generates a Google search URL for LinkedIn when no profile is known.
+  - `ContactEnricher.enrich(person, signals) -> Person` — applies GitHub profile data for each GitHub signal, pulls an `author_email` from any signal's metadata if email is still missing, and if no LinkedIn URL was found, sets a `linkedin_search_url` (Google `site:linkedin.com/in` query using name/school/area) in `contact_info`.
+  - `ContactEnricher._apply_github_profile(person, profile)` — extracts email, Twitter handle (from field, bio regex, or social accounts), LinkedIn URL (from bio regex, blog field if it's a LinkedIn URL, or social accounts), and personal site (blog field if not a LinkedIn URL) from a raw GitHub profile dict, only filling fields not already set and recording the source (`github`, `github_bio`, `github_blog`, `github_social`) in `contact_info`.
+
+## backend/enrichment/locations.py
+Defines `LocationResolver`, which fills a person's origin location, current location, and a normalized `region` bucket used by downstream concentration detection, using a school-to-location mapping and a hardcoded city-to-region table.
+
+- `CITY_REGIONS` — module-level dict mapping lowercase city/location substrings (e.g. `"san francisco"`, `"cambridge, ma"`, `"raleigh"`) to named region buckets (e.g. `"Bay Area"`, `"Boston Metro"`, `"Research Triangle"`).
+- `LocationResolver` — resolves origin/current location and region for a person from a school-locations JSON file plus signal data.
+  - `LocationResolver.__init__(school_locations_file)` — loads and parses the school-locations JSON file, keeping all entries except metadata keys prefixed with `_`.
+  - `LocationResolver.resolve(person, signals) -> Person` — if unset, fills `origin_location` from the known school's city or a `state` found in signal metadata; fills `current_location` from a GitHub signal's bio `location` field; fills `region` by checking origin location, then the school's mapped region, then current location against `CITY_REGIONS`.
+  - `LocationResolver._region_for(location) -> str | None` — static helper that lowercases a location string and returns the first matching region from `CITY_REGIONS`, or `None` if no substring matches.
+
+## backend/enrichment/provider_enricher.py
+Defines `ProviderEnricher` and supporting helpers that orchestrate the PDL→Coresignal provider chain, merging results into a `Person` and deriving conservative, dated discovery-cohort signals (`linkedin_created_recently`, `education_signal`, `job_change`), guarded by per-provider caching and budgets so no provider call is ever wasted or double-billed.
+
+- `build_provider_chain(settings) -> list[EnrichmentProvider]` — builds the ordered enrichment chain (PDL first, Coresignal second), including a provider only if its API key is configured, logging when a key is missing.
+- `build_provider(settings) -> EnrichmentProvider | None` — back-compat helper returning the first provider in the chain, or `None` if the chain is empty.
+- `_result_to_payload(result) -> dict` — converts an `EnrichmentResult` dataclass to a plain dict via `dataclasses.asdict` for cache storage.
+- `_result_from_payload(payload) -> EnrichmentResult` — reconstructs an `EnrichmentResult` (with nested `Education`/`Position` lists) from a cached dict payload.
+- `_is_sufficient(result) -> bool` — returns whether a result has enough useful data (LinkedIn URL, education, or positions) to stop walking the provider chain.
+- `EnrichOutcome` — dataclass capturing the per-person result of one chain walk: `status` (`matched`/`miss`/`skipped`/`no_provider`/`error`/`attempted`), which `provider` produced the accepted match, whether a `fresh_call`/paid call happened, whether the answer came `from_cache`, whether it was a non-primary `fallback`, and any `new_signals` created.
+- `ProviderEnricher` — walks the provider chain per person, applying cache/budget guardrails, merging contact fields, and emitting scored signals for discovery-cohort people only.
+  - `ProviderEnricher.__init__(providers, signals, cache, budget)` — stores the ordered provider list, the signal repository, the enrichment cache repository, and the `ProviderBudget`.
+  - `ProviderEnricher.provider` (property) — returns the first provider in the chain, or `None`, for callers that only need to test presence.
+  - `ProviderEnricher.enrich(person) -> list[Signal]` — convenience wrapper that calls `run(person)` and returns just its `new_signals`.
+  - `ProviderEnricher.apply_result(person, provider, result, evidence_tier=None) -> list[Signal]` — merges an already-fetched provider result (e.g. from provider search, already paid for) into `person` and persists derived discovery signals, without making a provider call or spending budget.
+  - `ProviderEnricher.run(person, dry_run=False) -> EnrichOutcome` — walks providers in order via `_fetch`, stopping fail-soft on error, skipping (soft) on budget exhaustion, continuing past definitive misses to the next provider, merging the first usable result's contacts, and taking a sufficient/first-available match; in dry-run mode, returns an `attempted` outcome as soon as a fresh call would be needed without ever calling the provider; for a resolved match, derives and persists new signals only for discovery-cohort people, then finalizes via `_finalize`.
+  - `ProviderEnricher.prioritize(people) -> list[Person]` — sorts people to put GitHub-only, still-pending, higher-scoring candidates first (using signal sources to detect GitHub-only people).
+  - `ProviderEnricher.pending_github_count(people) -> int` — counts people who are GitHub-only, still pending enrichment, and have a GitHub username.
+  - `ProviderEnricher._finalize(person, outcome, dry_run) -> EnrichOutcome` (static) — updates `person.enrichment_status`/`enrichment_provider`/`enrichment_updated_at` based on the outcome status (`provider_enriched`, `provider_no_match`, `provider_error`, `pending_budget`), skipped for dry runs, non-discovery cohorts, or people without a GitHub username.
+  - `ProviderEnricher._fetch(provider, person, dry_run=False) -> tuple[str, EnrichmentResult | None]` — checks the 30-day cache first (returning `cache_match`/`cache_miss`), then checks budget (`budget` if exhausted), then in dry-run returns `would_attempt` without calling; otherwise builds an `EnrichmentQuery` from the person and calls `provider.enrich_person`, treating a `None` result with `provider.last_error` set as a non-cacheable `error`, and otherwise spending budget and caching the result (even a `{}` miss) before returning `match`/`miss`.
+  - `ProviderEnricher._merge_contacts(person, provider, result)` — fills `person.linkedin_url`, `current_location`, and `contact_info` (`headline`, `linkedin_connections`, `enriched_by`) from the result, never overwriting existing values except always updating `enriched_by`.
+  - `ProviderEnricher._derive_signals(person, provider, result, evidence_tier=None) -> list[Signal]` — emits at most one `linkedin_created_recently` signal (from Coresignal's `profile_created_at` first-seen date within the last year, or from PDL's sparse-connections proxy under 200 connections when no date is available), an `education_signal` for the best-dated education entry, and a `job_change` signal for a position started within the last year, all deduplicated against existing signal types for that provider and skipped for `evidence_tier == "review"` where dated inference applies.
+  - `ProviderEnricher._best_education(education) -> Education | None` (static) — picks the education entry that is current (no end date) or has the latest start date.
+  - `ProviderEnricher._latest_position(positions) -> Position | None` (static) — picks the position with the latest `start_date` among those that have one.
+  - `ProviderEnricher._parse(iso) -> date | None` (static) — parses the first 10 characters of an ISO date string into a `date`, returning `None` on failure or empty input.
+
+## backend/enrichment/providers/__init__.py
+Empty file; marks `backend/enrichment/providers` as a Python package with no exported symbols.
+
+## backend/enrichment/providers/base.py
+Defines the shared `EnrichmentProvider` abstract contract and the typed query/result/search dataclasses that every licensed provider adapter (PDL, Coresignal) implements; adapters are fail-soft and must never raise, returning `None`/empty lists/`last_error` instead.
+
+- `normalize_date(value) -> str | None` — coerces varied provider date formats (`"2021"`, `"2021-05"`, full ISO timestamps) into `YYYY-MM-DD`, padding missing month/day with `01`; returns `None` if unparseable.
+- `EnrichmentQuery` — frozen dataclass holding the lookup inputs for a one-person enrichment call: `name`, `school`, `twitter_handle`, `github_username`, `linkedin_url` (the strongest key when already known).
+- `Education` — dataclass for one education record: `school`, `degree`, `field_of_study`, `start_date`, `end_date` (normalized).
+- `Position` — dataclass for one work-experience record: `company`, `title`, `start_date`, `end_date`, `is_current`.
+- `EnrichmentResult` — dataclass holding a mapped provider profile: `linkedin_url`, `headline`, `education` list, `positions` list, `profile_created_at` (Coresignal-only first-seen proxy), `location`, `connections`, provenance fields (`provider`, `provider_person_id`, `full_name` — populated for search results), and a slim `raw` payload dict for evidence/debugging.
+- `ProviderSearchPage` — dataclass for one resumable page of provider search results: `results`, `next_cursor`, `exhausted`, `api_requests` (HTTP request count), `returned_records`, and `credit_units` (the adapter's conservative billing-unit ledger).
+- `EnrichmentProvider` (ABC) — the interface every provider adapter must implement, with class attributes `name`, `supported_search_filters` (allowlisted filter keys), `search_credit_overhead`, and instance attribute `last_error` (set on every call: `None` for a definitive/cacheable answer, an error string for auth/network/server failures that must not be cached).
+  - `EnrichmentProvider.enrich_person(query) -> EnrichmentResult | None` (abstract) — performs a one-person lookup; `None` means no confident match or an API failure (distinguished via `last_error`).
+  - `EnrichmentProvider.search_people(filters, size=10) -> list[EnrichmentResult]` (abstract) — performs an allowlisted filter-based search returning up to `size` results carrying provider identity/name/LinkedIn/education/positions/location; empty list on no match or failure.
+  - `EnrichmentProvider.search_page(filters, size=10, cursor=None) -> ProviderSearchPage` — default one-page implementation (returns nothing on a non-empty cursor, otherwise wraps `search_people` into a fully-exhausted `ProviderSearchPage`); production adapters override this with real cursor/offset pagination.
+
+## backend/enrichment/providers/coresignal.py
+Implements `CoresignalProvider`, the Coresignal `employee_base` v2 adapter: known LinkedIn URLs use the collect-by-shorthand endpoint directly, otherwise a filtered search returns candidate ids that are then collected and mapped, with `created_at` treated as an upper-bound "first seen by Coresignal" proxy for profile age.
+
+- `SEARCH_FILTERS` — allowlist mapping internal filter keys (`school`, `title`, `location`, `country`, `created_at_gte`) to Coresignal's documented `employee_base` filter column names.
+- `MAX_SEARCH_SIZE` — caps search page size at 100.
+- `CoresignalProvider` — Coresignal adapter implementing `EnrichmentProvider` (`name = "coresignal"`).
+  - `CoresignalProvider.__init__(api_key, session=None)` — creates/stores a `requests.Session` with the `apikey` header set for authentication.
+  - `CoresignalProvider.enrich_person(query) -> EnrichmentResult | None` — if a LinkedIn URL is given, extracts its path shorthand and calls collect directly; otherwise searches by `full_name` (plus `education_institution_name` if school is known) and collects the first matching id; maps the raw record via `_map_person`, or returns `None` on no match/no name.
+  - `CoresignalProvider.search_people(filters, size=10) -> list[EnrichmentResult]` — thin wrapper returning `search_page(...).results`.
+  - `CoresignalProvider.search_page(filters, size=10, cursor=None) -> ProviderSearchPage` — builds allowlisted filters via `_build_filters`, resumes from an opaque JSON cursor (or legacy numeric offset) via `_resume_state` to avoid re-running the search request, collects the next `size` ids into full records, and returns a page with `next_cursor` set (carrying `{offset, ids}`) when more ids remain.
+  - `CoresignalProvider._resume_state(cursor) -> tuple[int, list | None]` (static) — parses a JSON cursor into `(offset, ids)`, falls back to treating a bare numeric string as a legacy offset with `ids=None` (forcing a re-search), or defaults to `(0, None)`.
+  - `CoresignalProvider._build_filters(filters) -> dict` (static) — maps only allowlisted filter keys to Coresignal column names, dropping and logging unsupported keys and falsy values.
+  - `CoresignalProvider._search(filters) -> list` — POSTs to `employee_base/search/filter`; returns `[]` on 404 (definitive no-match, cacheable) or on request exception/non-200 (setting `last_error` so it is not cached), otherwise returns the JSON list of candidate ids.
+  - `CoresignalProvider._collect(record_id) -> dict | None` — GETs `employee_base/collect/{id}` (URL-encoded), returning the JSON record or `None` while setting `last_error` on failure.
+  - `CoresignalProvider._map_person(data) -> EnrichmentResult` — maps a raw Coresignal record into an `EnrichmentResult`: education list (from `education` or `member_education_collection`, normalizing dates), positions list (from `experience` or `member_experience_collection`, with `is_current` when no end date), LinkedIn URL (prefixed with `https://` if missing scheme), `profile_created_at` normalized from `created_at`/`created` (the first-seen proxy), connections count, provenance fields, and a slim `raw` evidence dict.
+
+## backend/enrichment/providers/pdl.py
+Implements `PdlProvider`, the People Data Labs adapter using a single GET to `/v5/person/enrich` per person (auth via `X-Api-Key`, a 404 means no confident match) plus a SQL-style `/v5/person/search` for filtered search; PDL never exposes profile-creation date, so `profile_created_at` is always `None` and `linkedin_connections` is used as the enricher's new-profile proxy instead, and free-tier boolean-obscured fields are dropped via `_clean`.
+
+- `SEARCH_COLUMNS` — allowlist mapping internal filter keys (`school`, `major`, `degree`, `location`, `region`, `country`, `title_role`, `title_level`, `industry`) to PDL person-schema SQL column names.
+- `SEARCH_RANGE_COLUMNS` — allowlist for range filters, currently `education_end_date_gte` mapped to `("education.end_date", ">=")`.
+- `MAX_SEARCH_SIZE` — caps search page size at 100.
+- `_clean(value) -> str | None` — keeps only non-empty string values, dropping the booleans PDL substitutes for obscured free-tier fields.
+- `PdlProvider` — PDL adapter implementing `EnrichmentProvider` (`name = "pdl"`).
+  - `PdlProvider.__init__(api_key, min_likelihood=DEFAULT_MIN_LIKELIHOOD, session=None)` — stores the confidence threshold (PDL scale 0–10, default 6) and creates/stores a `requests.Session` with the `X-Api-Key` header.
+  - `PdlProvider.enrich_person(query) -> EnrichmentResult | None` — builds a `profile` list (LinkedIn URL, `github.com/<user>`, `twitter.com/<handle>`) and/or `name`+`school` params, refuses to spend a credit on name-alone queries (can't clear `min_likelihood`), then GETs `/person/enrich` and maps the result via `_map_person`.
+  - `PdlProvider.search_people(filters, size=10) -> list[EnrichmentResult]` — thin wrapper returning `search_page(...).results`.
+  - `PdlProvider.search_page(filters, size=10, cursor=None) -> ProviderSearchPage` — builds a SQL `WHERE` clause via `_build_where` from allowlisted filters, POSTs `{sql, size, from: offset}` to `/person/search`, treats 404 as a definitive empty result, and paginates using PDL's `from` offset as the cursor, computing `has_more` from the response's `total` when present.
+  - `PdlProvider._build_where(filters) -> str` — builds the SQL WHERE clause, mapping allowlisted equality columns (`=`) and list columns (`IN (...)`) or range columns (from `SEARCH_RANGE_COLUMNS`), escaping every value via `_escape` and logging/skipping unsupported filter keys.
+  - `PdlProvider._escape(value) -> str` (static) — strips control characters and doubles single quotes to safely embed a value in the generated SQL string.
+  - `PdlProvider._get(path, params) -> dict | None` — issues the GET request; returns `None` on 404 (definitive, cacheable miss) or non-200 (sets `last_error`, not cacheable) or below-threshold `likelihood`; otherwise returns the `data` payload.
+  - `PdlProvider._map_person(data) -> EnrichmentResult` — maps a raw PDL record into an `EnrichmentResult`: education list (school name from nested dict, cleaned degree/major, normalized dates), positions list (cleaned company/title, `is_current` from `is_primary` or missing end date), LinkedIn URL (prefixed with `https://` if missing scheme, cleaned), `profile_created_at` always `None`, `linkedin_connections` as the connections proxy, provenance fields (`id` or `pdl_id`, `full_name`), and a slim `raw` evidence dict.
