@@ -1,0 +1,6 @@
+{
+  "_note": "Leaderboard pages for free-source discovery (ProductHuntScraper). PH's leaderboard is a JS-rendered SPA and has no server-side maker names -- product URLs are extracted here, then each product page is rendered separately to find its makers' PH profile links (/@username). Update `url` if PH's leaderboard route changes.",
+  "sources": [
+    { "id": "producthunt_today", "name": "Product Hunt - Today", "url": "https://www.producthunt.com/" }
+  ]
+}

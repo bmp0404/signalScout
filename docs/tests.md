@@ -63,6 +63,22 @@ Covers Phase 3 free-source discovery: generic HTML lead extraction (`extract_lea
   - `test_pdl_identify_miss_leaves_lead_unresolved_and_uninserted()` — asserts a definitive PDL miss buckets the lead into `unresolved` and inserts nobody (the tentative row is rolled back via `persons.delete`).
   - `test_provider_outage_leaves_lead_unresolved_without_billing()` — asserts a transient provider error also leaves the lead unresolved/uninserted and spends no budget (mirrors `ProviderEnricher`'s "error is not a definitive miss" contract).
 
+## tests/test_producthunt_scraper.py
+Covers `ProductHuntScraper`'s pure-parse regex logic (the part that runs on already-rendered HTML) and its fail-soft behavior when Playwright isn't installed. Real Playwright browser rendering is exercised live, not in this suite — the same boundary `test_free_source_discovery.py`'s `ConfigScraperTests` draws around `requests.Session` via a fake `_Session`/`_Resp`, just one level further out since this scraper's fetch step is a full browser render rather than a single GET.
+
+- `ProductUrlsTests`
+  - `test_extracts_post_and_product_links()` — asserts both `/posts/<slug>` and `/products/<slug>` link shapes are extracted and resolved to absolute URLs.
+  - `test_deduplicates_repeated_links()` — asserts the same product link appearing twice on a leaderboard page only produces one URL.
+  - `test_no_product_links_returns_empty()` — asserts HTML with no product links returns `[]`.
+- `MakersTests`
+  - `test_extracts_maker_name_and_profile_link()` — asserts a `/@username` link with name-like anchor text produces one `RawLead` with `personal_site` set to the absolute PH profile URL and no `linkedin_url`.
+  - `test_non_name_link_text_is_skipped()` — asserts a `/@username` link whose anchor text isn't name-like (e.g. "Follow") produces no lead.
+  - `test_duplicate_maker_on_one_page_is_deduped()` — asserts the same maker profile link appearing twice on one product page only produces one lead.
+  - `test_no_maker_links_returns_empty()` — asserts HTML with no maker profile links returns `[]`.
+- `ScrapeFailSoftTests`
+  - `test_missing_sources_file_is_fail_soft()` — asserts a nonexistent sources file makes `_sources()` return `[]`, not raise.
+  - `test_scrape_without_playwright_installed_returns_empty()` — asserts `scrape()` degrades to `[]` (not an `ImportError`) in this repo's test environment, which has no Playwright installed.
+
 ## tests/test_provider_diversification.py
 Fixture-driven tests (HTTP layer mocked, providers faked; never spend real credits) covering the PDL->Coresignal enrichment chain (caching, budgets, fallback, fail-soft outages), both provider-search discovery paths — batch `ProviderExpander.expand()` (no-GitHub candidates, cross-provider dedupe/merge, pagination checkpointing, evidence-tier classification) and the recipe layer's `ProviderExpander.run_recipe()` (approval gating, founder vs. student_technical admission, relative-date filter computation, dedupe, hard limits, budget exhaustion, and company-first discovery) — adapter allowlisting/escaping for PDL and Coresignal query builders, raw HTTP response mapping for both adapters (including PDL's `scroll_token` pagination), and an unchanged-founder-backtest regression guard. `ChainTestBase` exposes shared `_filters_file`/`_expander` helpers used by every provider-search test class in this file (and reused by `test_free_source_discovery.py`).
 

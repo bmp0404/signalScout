@@ -26,6 +26,7 @@ class Settings:
     openalex_targets_file: Path = DATA_DIR / "openalex_targets.json"
     fellowship_sources_file: Path = DATA_DIR / "fellowship_sources.json"
     competition_sources_file: Path = DATA_DIR / "competition_sources.json"
+    producthunt_sources_file: Path = DATA_DIR / "producthunt_sources.json"
 
     # Scoring / backtest knobs (tuned against the backtest, see backend/scoring/weights.py)
     flag_threshold: float = 40.0  # normalized 0-100 score at which a candidate is "flagged"

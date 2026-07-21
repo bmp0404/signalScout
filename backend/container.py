@@ -34,6 +34,7 @@ from backend.scoring.engine import ScoringEngine
 from backend.scrapers.competition_scraper import CompetitionScraper
 from backend.scrapers.fellowship_scraper import FellowshipScraper
 from backend.scrapers.openalex import OpenAlexClient, OpenAlexScraper
+from backend.scrapers.producthunt_scraper import ProductHuntScraper
 from backend.scrapers.resolve import LeadResolver
 from backend.security.email_actions import EmailActionSigner
 from backend.services.candidate_service import CandidateService
@@ -80,6 +81,7 @@ class Container:
         )
         self.fellowship_scraper = FellowshipScraper(self.settings.fellowship_sources_file)
         self.competition_scraper = CompetitionScraper(self.settings.competition_sources_file)
+        self.producthunt_scraper = ProductHuntScraper(self.settings.producthunt_sources_file)
         self.lead_resolver = LeadResolver(
             self.persons, self.provider_identities, self.provider_enricher,
         )

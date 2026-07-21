@@ -11,6 +11,9 @@ FROM python:3.12-slim
 WORKDIR /app
 COPY requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
+# Chromium + OS deps for the Product Hunt scraper (backend/scrapers/producthunt_scraper.py).
+# Meaningfully larger image / slower build than the rest of this Dockerfile.
+RUN playwright install --with-deps chromium
 COPY backend/ backend/
 COPY scripts/ scripts/
 COPY data/ data/
